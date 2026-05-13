@@ -4,6 +4,7 @@ import pandas as pd
 import plotly.graph_objects as go
 import time
 from datetime import datetime, timedelta
+import pytz
 
 # 頁面設定
 st.set_page_config(page_title="台股終極策略監控", layout="wide", initial_sidebar_state="collapsed")
@@ -27,7 +28,7 @@ def calculate_rsi(series, period):
     rs = gain / loss.replace(0, 0.001)
     return 100 - (100 / (1 + rs))
 
-@st.cache_data(ttl=60)
+@st.cache_data(ttl=30)
 def get_analysis_data(ticker_input):
     try:
         symbol = ticker_input.strip()
@@ -52,31 +53,35 @@ def get_analysis_data(ticker_input):
         if isinstance(df.columns, pd.MultiIndex):
             df.columns = df.columns.get_level_values(0)
 
-        # --- 增強版即時報價補點 ---
-        current_price = None
+        # --- 極限即時補點邏輯：確保 5/13, 5/14 有數據 ---
+        tz_tw = pytz.timezone('Asia/Taipei')
+        now_tw = datetime.now(tz_tw)
+        
+        # 獲取最新成交價 (使用 basic_info 作為首選)
         try:
-            # 優先級 1: fast_info (最快)
-            current_price = ticker_obj.fast_info.get('last_price')
-            # 優先級 2: info 中的價格 (備援)
-            if not current_price:
-                current_price = ticker_obj.info.get('regularMarketPrice')
-            # 優先級 3: 歷史數據最後一筆 (最終保底)
-            if not current_price:
+            current_price = ticker_obj.basic_info['last_price']
+            if current_price is None or current_price == 0:
+                current_price = ticker_obj.fast_info.get('last_price')
+            if current_price is None or current_price == 0:
                 current_price = df['Close'].iloc[-1]
         except:
             current_price = df['Close'].iloc[-1]
 
-        now = datetime.now()
-        # 判斷最後一筆日期是否為今天 (考慮時區，簡單化處理)
-        last_date = df.index[-1].date()
-        if last_date < now.date() and now.hour >= 9:
-            # 補上一筆今天的數據
+        # 檢查最後一筆資料的日期
+        last_date = df.index[-1].astimezone(tz_tw).date()
+        
+        # 如果最後一筆資料不是今天，且現在是開盤日（或是收盤後的即時價更新）
+        if last_date < now_tw.date():
+            # 建立一個新的數據點
+            new_timestamp = pd.Timestamp(now_tw.replace(hour=0, minute=0, second=0, microsecond=0))
             new_row = pd.DataFrame({
                 'Open': [current_price], 'High': [current_price], 
                 'Low': [current_price], 'Close': [current_price], 'Volume': [0]
-            }, index=[pd.Timestamp(now.date(), tz=df.index.tz)])
+            }, index=[new_timestamp])
+            # 確保時區一致後合併
+            new_row.index = new_row.index.tz_localize(df.index.tz)
             df = pd.concat([df, new_row])
-        # -----------------------
+        # -------------------------------------------
 
         close = df['Close']
         df['MA5'] = close.rolling(5).mean()
@@ -116,7 +121,6 @@ for i, d in enumerate(day_options):
 data, final_ticker = get_analysis_data(user_input)
 
 if data is not None:
-    # 修正之前的 AttributeError 語法
     num_days = st.session_state.view_days
     display_df = data.tail(num_days)
     latest = display_df.iloc[-1]
@@ -156,12 +160,13 @@ if data is not None:
     else: status, sc = "趨勢觀察中", "#94a3b8"
     
     st.markdown(f"""<div class="status-box" style="border: 2px solid {sc}; color: {sc}; background: {sc}15;">{status}</div>""", unsafe_allow_html=True)
-    st.caption(f"標的: {final_ticker} | 最後數據時間: {latest.name.strftime('%Y-%m-%d')}")
+    
+    # 顯示精確的時間戳，方便確認是否有更新
+    st.caption(f"標的: {final_ticker} | 最後更新點日期: {latest.name.strftime('%Y-%m-%d')}")
 
-    # --- 盤中自動刷新邏輯 (每 30 秒) ---
-    now = datetime.now()
-    if now.weekday() < 5 and (9 <= now.hour < 14):
-        time.sleep(30)
-        st.rerun()
+    # --- 自動刷新邏輯 ---
+    # 為了讓使用者在沒開盤時也能看，移除小時限制，改為通用 30 秒刷新
+    time.sleep(30)
+    st.rerun()
 else:
     st.warning(f"目前無法獲取 '{user_input}' 的數據，請檢查代號是否正確。")
