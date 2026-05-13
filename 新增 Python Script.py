@@ -49,7 +49,7 @@ def fetch_data(symbol):
         if isinstance(df.columns, pd.MultiIndex):
             df.columns = df.columns.get_level_values(0)
 
-        # 數據清理：移除時區資訊以避免計算錯誤 (Already tz-aware 修正)
+        # 數據清理：移除時區資訊
         if df.index.tz is not None:
             df.index = df.index.tz_localize(None)
 
@@ -59,8 +59,20 @@ def fetch_data(symbol):
         df['RSI5'] = calculate_rsi(df['Close'], 5)
         df['RSI10'] = calculate_rsi(df['Close'], 10)
         
-        # 買賣訊號
-        df['Buy_Signal'] = (df['RSI5'] > df['RSI10']) & (df['RSI5'].shift(1) <= df['RSI10'].shift(1))
+        # 計算 10 日乖離率 (BIAS)
+        df['BIAS10'] = ((df['Close'] - df['MA10']) / df['MA10']) * 100
+        
+        # --- 買進訊號策略更新 ---
+        # 1. MA5 > MA10
+        # 2. RSI5 > RSI10 且 RSI5 > 50
+        # 3. BIAS10 < 5%
+        cond1 = df['MA5'] > df['MA10']
+        cond2 = (df['RSI5'] > df['RSI10']) & (df['RSI5'] > 50)
+        cond3 = df['BIAS10'] < 5
+        
+        df['Buy_Signal'] = cond1 & cond2 & cond3
+        
+        # 賣出訊號 (維持原樣或可根據需要調整)
         df['Sell_Signal'] = (df['Close'] < df['MA10']) & (df['RSI5'] < 45)
         
         return df, formatted_sid
@@ -89,8 +101,6 @@ for i, d in enumerate(day_options):
 data, final_sid = fetch_data(target_stock)
 
 if data is not None:
-    # 根據選取的天數過濾數據
-    # 修正截圖中的 AttributeError 錯誤：將 st.session_state.session_state.view_days 改回 st.session_state.view_days
     view_days = st.session_state.view_days if 'view_days' in st.session_state else 60
     display_df = data.tail(view_days)
     latest = display_df.iloc[-1]
@@ -126,30 +136,30 @@ if data is not None:
         xaxis=dict(
             showgrid=False, 
             rangeslider=dict(visible=False),
-            fixedrange=True # 禁止 X 軸縮放，防止出現縮放框
+            fixedrange=True
         ),
         yaxis=dict(
             side='right',
             gridcolor='#334155',
             range=[y_range_min, y_range_max],
-            fixedrange=True # 禁止 Y 軸縮放，防止出現縮放框
+            fixedrange=True
         ),
         hovermode="x unified",
-        dragmode=False # 完全禁用拖曳縮放行為
+        dragmode=False
     )
 
-    # 隱藏工具列
     st.plotly_chart(fig, use_container_width=True, config={'displayModeBar': False})
 
     # 狀態資訊卡
-    c1, c2, c3 = st.columns(3)
+    c1, c2, c3, c4 = st.columns(4)
     c1.metric("當前價格", f"{latest['Close']:.2f}")
     c2.metric("RSI(5)", f"{latest['RSI5']:.1f}")
-    c3.metric("5日均線", f"{latest['MA5']:.2f}")
+    c3.metric("10日乖離", f"{latest['BIAS10']:.2f}%")
+    c4.metric("5日均線", f"{latest['MA5']:.2f}")
 
     # 訊號提示
     if latest['Buy_Signal']:
-        st.markdown('<div class="status-box" style="background:#450a0a; color:#f87171; border:1px solid #ef4444;">🔥 偵測到買入訊號：RSI 黃金交叉</div>', unsafe_allow_html=True)
+        st.markdown('<div class="status-box" style="background:#450a0a; color:#f87171; border:1px solid #ef4444;">🔥 偵測到精確買入訊號：均線+RSI+乖離率多重符合</div>', unsafe_allow_html=True)
     elif latest['Sell_Signal']:
         st.markdown('<div class="status-box" style="background:#064e3b; color:#4ade80; border:1px solid #22c55e;">⚠️ 注意：價格跌破均線且 RSI 偏弱</div>', unsafe_allow_html=True)
     else:
