@@ -90,7 +90,9 @@ data, final_sid = fetch_data(target_stock)
 
 if data is not None:
     # 根據選取的天數過濾數據
-    display_df = data.tail(st.session_state.view_days)
+    # 修正截圖中的 AttributeError 錯誤：將 st.session_state.session_state.view_days 改回 st.session_state.view_days
+    view_days = st.session_state.view_days if 'view_days' in st.session_state else 60
+    display_df = data.tail(view_days)
     latest = display_df.iloc[-1]
     
     # 動態 Y 軸範圍計算
@@ -121,17 +123,22 @@ if data is not None:
         template="plotly_dark",
         height=500,
         margin=dict(l=10, r=10, t=30, b=10),
-        xaxis=dict(showgrid=False, rangeslider=dict(visible=False)),
+        xaxis=dict(
+            showgrid=False, 
+            rangeslider=dict(visible=False),
+            fixedrange=True # 禁止 X 軸縮放，防止出現縮放框
+        ),
         yaxis=dict(
             side='right',
             gridcolor='#334155',
             range=[y_range_min, y_range_max],
-            fixedrange=False
+            fixedrange=True # 禁止 Y 軸縮放，防止出現縮放框
         ),
-        hovermode="x unified"
+        hovermode="x unified",
+        dragmode=False # 完全禁用拖曳縮放行為
     )
 
-    # 使用 config={'displayModeBar': False} 隱藏右上角工具列
+    # 隱藏工具列
     st.plotly_chart(fig, use_container_width=True, config={'displayModeBar': False})
 
     # 狀態資訊卡
