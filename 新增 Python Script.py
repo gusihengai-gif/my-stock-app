@@ -74,13 +74,20 @@ st.markdown(f"""<div class="stock-header"><h1 style='margin:0; color:white; font
 
 user_input = st.text_input("🔍 輸入台股代號 (例如: 2330, 2454, 0050)", value="2330")
 
-# 預設顯示最近 60 天
-view_days = 60
+# --- 重新加回天數切換功能 ---
+if 'view_days' not in st.session_state:
+    st.session_state.view_days = 60
+
+cols = st.columns(5)
+days_map = [("10天", 10), ("20天", 20), ("60天", 60), ("120天", 120), ("240天", 240)]
+for i, (label, val) in enumerate(days_map):
+    if cols[i].button(label):
+        st.session_state.view_days = val
 
 data, final_ticker = get_analysis_data(user_input)
 
 if data is not None:
-    display_df = data.tail(view_days)
+    display_df = data.tail(st.session_state.session_state.view_days if 'view_days' in st.session_state else 60)
     latest = display_df.iloc[-1]
     
     # --- 主圖表 ---
@@ -114,6 +121,10 @@ if data is not None:
     fig.add_trace(go.Scatter(x=sells.index, y=sells['Close'], mode='markers', name='賣出',
                              marker=dict(symbol='triangle-down', size=15, color='#00f900')))
 
+    # 自動計算 Y 軸範圍，避免縮放不正確
+    y_min = display_df['Close'].min() * 0.98
+    y_max = display_df['Close'].max() * 1.02
+
     fig.update_layout(
         height=500, 
         template="plotly_dark", 
@@ -137,14 +148,14 @@ if data is not None:
             spikesnap='cursor',
             showline=True, 
             linecolor='#30363d',
-            autorange=True,
-            fixedrange=False
+            range=[y_min, y_max],  # 鎖定當前天數內的最佳顯示範圍
+            autorange=False        # 改為 False 以使用自定義 range
         ),
         showlegend=False,
         hovermode="x unified"
     )
     
-    # 關鍵修正：config={'displayModeBar': False} 隱藏右上角工具列 (相機、放大鏡等)
+    # 保持隱藏右上角相機工具列，讓畫面簡潔
     st.plotly_chart(fig, use_container_width=True, config={'displayModeBar': False})
 
     # --- 指標數據卡 ---
