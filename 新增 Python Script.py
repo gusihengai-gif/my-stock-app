@@ -101,6 +101,10 @@ if data is not None:
     display_df = data.tail(st.session_state.view_days)
     latest = display_df.iloc[-1]
     
+    # 計算 Y 軸邊界，讓曲線不貼邊
+    y_min = display_df['Close'].min() * 0.95
+    y_max = display_df['Close'].max() * 1.05
+    
     # --- 主圖表 ---
     fig = go.Figure()
     fig.add_trace(go.Scatter(
@@ -123,10 +127,17 @@ if data is not None:
         height=500, template="plotly_dark",
         paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)',
         margin=dict(l=10, r=10, t=10, b=10),
-        xaxis=dict(showgrid=False, fixedrange=True), # 禁用 X 軸縮放
-        yaxis=dict(side='right', gridcolor='#1e293b', fixedrange=True), # 禁用 Y 軸縮放
+        xaxis=dict(showgrid=False, fixedrange=True),
+        yaxis=dict(
+            side='right', 
+            gridcolor='#1e293b', 
+            fixedrange=True,
+            range=[y_min, y_max], # 設定優化的 Y 軸顯示範圍
+            tickformat='.2f',    # 顯示至小數點後兩位
+            showgrid=True        # 顯示水平格線
+        ),
         hovermode="x unified", showlegend=False,
-        dragmode=False # 徹底禁用鼠標框選縮放
+        dragmode=False 
     )
     
     # 使用 config 參數隱藏右上角工具列 (Modebar)
