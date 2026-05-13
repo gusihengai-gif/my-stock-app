@@ -34,17 +34,35 @@ def get_analysis_data(ticker_input):
         symbol = ticker_input.strip()
         if symbol.isdigit(): symbol = f"{symbol}.TW"
         
-        # 使用 1d interval 獲取最新資料
-        df = yf.download(symbol, period="2y", auto_adjust=True, progress=False)
+        # 核心優化：優先抓取最新 1 天的即時數據
+        # 這樣能解決 yfinance 對台股收盤數據更新較慢的問題
+        df = yf.download(symbol, period="2y", interval="1d", auto_adjust=True, progress=False)
+        
+        # 如果是交易時段，嘗試補強最後一筆價格
+        ticker_obj = yf.Ticker(symbol)
+        fast_info = ticker_obj.fast_info
+        
+        if not df.empty:
+            # 確保欄位名稱正確
+            if isinstance(df.columns, pd.MultiIndex):
+                df.columns = df.columns.get_level_values(0)
+            
+            # 檢查最後一筆日期，如果不是今天且目前是交易時間，則補上即時價
+            last_date = df.index[-1].date()
+            today = datetime.now().date()
+            if last_date < today and 'last_price' in fast_info:
+                # 建立一條新的數據行來代表今天
+                new_row = df.iloc[-1:].copy()
+                new_row.index = [pd.Timestamp(today)]
+                new_row['Close'] = fast_info['last_price']
+                df = pd.concat([df, new_row])
+        
         if df.empty and ".TW" in symbol:
             symbol = symbol.replace(".TW", ".TWO")
             df = yf.download(symbol, period="2y", auto_adjust=True, progress=False)
         
         if df.empty: return None, symbol
 
-        if isinstance(df.columns, pd.MultiIndex):
-            df.columns = df.columns.get_level_values(0)
-        
         close = df['Close'].squeeze()
         df['MA5'] = close.rolling(5).mean()
         df['MA10'] = close.rolling(10).mean()
