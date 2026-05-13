@@ -2,449 +2,22 @@ import streamlit as st
 import yfinance as yf
 import pandas as pd
 import plotly.graph_objects as go
-from streamlit_autorefresh import st_autorefresh
-from datetime import datetime
-import pytz
-
-# 頁面設定
-st.set_page_config(
-    page_title="台股即時監控專業版",
-    layout="wide",
-    initial_sidebar_state="collapsed"
-)
-
-# CSS 樣式
-st.markdown("""
-<style>
-.main {
-    background-color: #0b1117;
-    color: #e2e8f0;
-}
-
-div[data-testid="stMetricValue"] {
-    font-size: 1.8rem;
-    color: #38bdf8;
-    font-weight: 800;
-}
-
-.stMetric {
-    background-color: #161b22;
-    border-radius: 12px;
-    border: 1px solid #30363d;
-    padding: 15px;
-}
-
-.stock-header {
-    background: linear-gradient(90deg, #161b22 0%, #1e293b 100%);
-    padding: 15px;
-    border-radius: 12px;
-    border-left: 6px solid #38bdf8;
-    margin-bottom: 10px;
-}
-
-.stButton>button {
-    width: 100%;
-    border-radius: 8px;
-    background-color: #1e293b;
-    color: #38bdf8;
-    border: 1px solid #30363d;
-}
-
-.status-box {
-    text-align: center;
-    padding: 12px;
-    border-radius: 10px;
-    margin-top: 10px;
-    font-weight: bold;
-}
-</style>
-""", unsafe_allow_html=True)
-
-# RSI 計算（Wilder RSI）
-def calculate_rsi(series, period=14):
-    delta = series.diff()
-
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-
-    avg_gain = gain.ewm(alpha=1/period, adjust=False).mean()
-    avg_loss = loss.ewm(alpha=1/period, adjust=False).mean()
-
-    rs = avg_gain / avg_loss
-    rsi = 100 - (100 / (1 + rs))
-
-    return rsi
-
-# 取得股票資料
-@st.cache_data(ttl=30)
-def get_stock_data(ticker_input):
-
-    try:
-        sid = ticker_input.strip().upper()
-
-        # 台股自動補 .TW
-        formatted_sid = f"{sid}.TW" if sid.isdigit() else sid
-
-        # 日K資料
-        df = yf.download(
-            formatted_sid,
-            period="2y",
-            interval="1d",
-            progress=False,
-            auto_adjust=False
-        )
-
-        # 上櫃股票改 TWO
-        if df.empty and sid.isdigit():
-            formatted_sid = f"{sid}.TWO"
-
-            df = yf.download(
-                formatted_sid,
-                period="2y",
-                interval="1d",
-                progress=False,
-                auto_adjust=False
-            )
-
-        if df.empty:
-            return None, sid
-
-        # MultiIndex 修正
-        if isinstance(df.columns, pd.MultiIndex):
-            df.columns = df.columns.get_level_values(0)
-
-        # ===== 即時價格修正 =====
-        ticker_obj = yf.Ticker(formatted_sid)
-
-        # 1分鐘K
-        intraday = ticker_obj.history(
-            period="1d",
-            interval="1m"
-        )
-
-        if not intraday.empty:
-
-            latest_row = intraday.iloc[-1]
-
-            live_price = latest_row['Close']
-            live_volume = latest_row['Volume']
-
-            tz_tw = pytz.timezone('Asia/Taipei')
-            now_tw = datetime.now(tz_tw)
-
-            last_date_in_df = df.index[-1].date()
-
-            # 如果今天還沒有日K
-            if last_date_in_df < now_tw.date():
-
-                new_timestamp = pd.Timestamp(now_tw.date())
-
-                new_row = pd.DataFrame({
-                    'Open': [intraday['Open'].iloc[0]],
-                    'High': [intraday['High'].max()],
-                    'Low': [intraday['Low'].min()],
-                    'Close': [live_price],
-                    'Volume': [live_volume]
-                }, index=[new_timestamp])
-
-                df = pd.concat([df, new_row])
-
-            else:
-                # 如果今天已有資料，更新今天K線
-                today_idx = df.index[-1]
-
-                df.loc[today_idx, 'Close'] = live_price
-                df.loc[today_idx, 'High'] = max(
-                    df.loc[today_idx, 'High'],
-                    intraday['High'].max()
-                )
-                df.loc[today_idx, 'Low'] = min(
-                    df.loc[today_idx, 'Low'],
-                    intraday['Low'].min()
-                )
-                df.loc[today_idx, 'Volume'] = live_volume
-
-        # ===== 技術指標 =====
-        close = df['Close']
-
-        df['MA5'] = close.rolling(5).mean()
-        df['MA10'] = close.rolling(10).mean()
-        df['MA20'] = close.rolling(20).mean()
-        df['MA60'] = close.rolling(60).mean()
-
-        df['RSI5'] = calculate_rsi(close, 5)
-        df['RSI10'] = calculate_rsi(close, 10)
-
-        df['BIAS10'] = (
-            (close - df['MA10']) / df['MA10']
-        ) * 100
-
-        # ===== 買入訊號 =====
-        df['Buy_Signal'] = (
-            (df['RSI5'] > df['RSI10']) &
-            (df['RSI5'].shift(1) <= df['RSI10'].shift(1)) &
-            (df['RSI5'] > 50) &
-            (df['BIAS10'] < 5)
-        )
-
-        # ===== 賣出訊號 =====
-        df['Sell_Signal'] = (
-            (df['MA5'] < df['MA10']) &
-            (df['RSI5'] < 50)
-        )
-
-        return df, formatted_sid
-
-    except Exception as e:
-        st.error(f"錯誤: {e}")
-        return None, ticker_input
-
-# 初始化
-if 'view_days' not in st.session_state:
-    st.session_state.view_days = 60
-
-# 自動刷新（30秒）
-st_autorefresh(
-    interval=30000,
-    key="refresh_data"
-)
-
-# ===== UI =====
-
-st.markdown(
-    '<div class="stock-header"><h3 style="margin:0;">🚀 台股全時段監測系統</h3></div>',
-    unsafe_allow_html=True
-)
-
-# 輸入區
-c1, c2 = st.columns([4, 1])
-
-with c1:
-    stock_code = st.text_input(
-        "股票代碼",
-        value="2330",
-        label_visibility="collapsed"
-    )
-
-with c2:
-    if st.button("🔄 手動刷新"):
-        st.cache_data.clear()
-        st.rerun()
-
-# 天數按鈕
-d_cols = st.columns(5)
-
-for i, d in enumerate([10, 20, 60, 120, 240]):
-
-    if d_cols[i].button(f"{d}天"):
-        st.session_state.view_days = d
-
-# 取得資料
-data, real_sid = get_stock_data(stock_code)
-
-# ===== 顯示 =====
-
-if data is not None:
-
-    display_df = data.tail(st.session_state.view_days)
-
-    latest = display_df.iloc[-1]
-
-    # Y軸範圍
-    y_min = display_df['Low'].min() * 0.98
-    y_max = display_df['High'].max() * 1.02
-
-    # ===== Plotly =====
-    fig = go.Figure()
-
-    # 收盤價
-    fig.add_trace(go.Scatter(
-        x=display_df.index,
-        y=display_df['Close'],
-        name="收盤價",
-        line=dict(color='#38bdf8', width=3),
-        hovertemplate=
-        "價格: %{y:.2f}<br>" +
-        "MA5: %{customdata[0]:.2f}<br>" +
-        "MA10: %{customdata[1]:.2f}<br>" +
-        "RSI5: %{customdata[2]:.1f}<extra></extra>",
-        customdata=display_df[['MA5', 'MA10', 'RSI5']]
-    ))
-
-    # MA5
-    fig.add_trace(go.Scatter(
-        x=display_df.index,
-        y=display_df['MA5'],
-        name="MA5",
-        line=dict(color='#f59e0b', width=1.5)
-    ))
-
-    # MA10
-    fig.add_trace(go.Scatter(
-        x=display_df.index,
-        y=display_df['MA10'],
-        name="MA10",
-        line=dict(color='#22c55e', width=1.5)
-    ))
-
-    # MA20
-    fig.add_trace(go.Scatter(
-        x=display_df.index,
-        y=display_df['MA20'],
-        name="MA20",
-        line=dict(color='#ef4444', width=1.5)
-    ))
-
-    # 買點
-    buys = display_df[display_df['Buy_Signal']]
-
-    fig.add_trace(go.Scatter(
-        x=buys.index,
-        y=buys['Close'],
-        mode='markers',
-        marker=dict(
-            symbol='triangle-up',
-            size=15,
-            color='#ef4444'
-        ),
-        name='買入'
-    ))
-
-    # 賣點
-    sells = display_df[display_df['Sell_Signal']]
-
-    fig.add_trace(go.Scatter(
-        x=sells.index,
-        y=sells['Close'],
-        mode='markers',
-        marker=dict(
-            symbol='triangle-down',
-            size=15,
-            color='#22c55e'
-        ),
-        name='賣出'
-    ))
-
-    # Layout
-    fig.update_layout(
-        height=500,
-        template="plotly_dark",
-        hovermode="x unified",
-        margin=dict(l=10, r=10, t=10, b=10),
-        paper_bgcolor='rgba(0,0,0,0)',
-        plot_bgcolor='rgba(0,0,0,0)',
-
-        xaxis=dict(
-            showgrid=False,
-            type='date'
-        ),
-
-        yaxis=dict(
-            side='right',
-            gridcolor='#1e293b',
-            range=[y_min, y_max],
-            tickformat='.1f'
-        ),
-
-        hoverlabel=dict(
-            bgcolor="#1e293b",
-            font_size=13
-        )
-    )
-
-    # 圖表
-    st.plotly_chart(
-        fig,
-        use_container_width=True,
-        config={'displayModeBar': False}
-    )
-
-    # ===== 指標卡 =====
-
-    m1, m2, m3, m4 = st.columns(4)
-
-    m1.metric(
-        "即時成交價",
-        f"{latest['Close']:.2f}"
-    )
-
-    m2.metric(
-        "RSI(5)",
-        f"{latest['RSI5']:.1f}"
-    )
-
-    m3.metric(
-        "10日乖離",
-        f"{latest['BIAS10']:.1f}%"
-    )
-
-    m4.metric(
-        "成交量",
-        f"{int(latest['Volume']):,}"
-    )
-
-    # ===== 趨勢 =====
-
-    if (
-        latest['MA5'] >
-        latest['MA10'] >
-        latest['MA20']
-    ):
-        trend = "🟢 多頭排列"
-
-    elif (
-        latest['MA5'] <
-        latest['MA10'] <
-        latest['MA20']
-    ):
-        trend = "🔴 空頭排列"
-
-    else:
-        trend = "🟡 盤整"
-
-    st.markdown(
-        f"""
-        <div class="status-box"
-        style="background:#1e293b;
-        color:#e2e8f0;
-        border:1px solid #334155;">
-        {trend}
-        </div>
-        """,
-        unsafe_allow_html=True
-    )
-
-    # ===== 訊號 =====
-
-    if latest['Buy_Signal']:
-
-        st.markdown(
-            '''
-            <div class="status-box"
-            style="background:#450a0a;
-            color:#f87171;
-            border:1px solid #ef4444;">
-            🚨 買入訊號：RSI 黃金交叉
-            </div>import streamlit as st
-import yfinance as yf
-import pandas as pd
-import plotly.graph_objects as go
 import time
 from datetime import datetime
 import pytz
 
-# 頁面設定
-st.set_page_config(page_title="台股即時監控專業版", layout="wide", initial_sidebar_state="collapsed")
+# 頁面基本設定
+st.set_page_config(page_title="台股即時監控系統", layout="wide")
 
-# CSS 樣式：強化 Y 軸與 Tooltip 質感
+# 解決 session_state 初始化問題
+if 'view_days' not in st.session_state:
+    st.session_state.view_days = 60
+
+# 自定義 CSS
 st.markdown("""
     <style>
-    .main { background-color: #0b1117; color: #e2e8f0; }
-    div[data-testid="stMetricValue"] { font-size: 1.8rem; color: #38bdf8; font-weight: 800; }
-    .stMetric { background-color: #161b22; border-radius: 12px; border: 1px solid #30363d; padding: 15px; }
-    .stock-header { background: linear-gradient(90deg, #161b22 0%, #1e293b 100%); padding: 15px; border-radius: 12px; border-left: 6px solid #38bdf8; margin-bottom: 10px; }
-    .stButton>button { width: 100%; border-radius: 8px; background-color: #1e293b; color: #38bdf8; border: 1px solid #30363d; }
-    .status-box { text-align: center; padding: 12px; border-radius: 10px; margin-top: 10px; font-weight: bold; }
+    .stMetric { background-color: #161b22; border-radius: 10px; padding: 10px; border: 1px solid #30363d; }
+    .status-box { padding: 15px; border-radius: 10px; margin: 10px 0; font-weight: bold; text-align: center; }
     </style>
     """, unsafe_allow_html=True)
 
@@ -455,155 +28,126 @@ def calculate_rsi(series, period):
     rs = gain / loss.replace(0, 0.001)
     return 100 - (100 / (1 + rs))
 
-@st.cache_data(ttl=30)
-def get_stock_data(ticker_input):
+@st.cache_data(ttl=60)
+def fetch_data(symbol):
     try:
-        sid = ticker_input.strip().upper()
-        formatted_sid = f"{sid}.TW" if sid.isdigit() else sid
+        sid = symbol.strip().upper()
+        # 判斷是否需要加上台股後綴
+        formatted_sid = f"{sid}.TW" if sid.isdigit() and len(sid) <= 4 else sid
         
-        # 1. 抓取歷史 K 線
         df = yf.download(formatted_sid, period="2y", interval="1d", progress=False)
+        
+        # 若 .TW 沒數據，嘗試 .TWO (上櫃)
         if df.empty and sid.isdigit():
             formatted_sid = f"{sid}.TWO"
             df = yf.download(formatted_sid, period="2y", interval="1d", progress=False)
+            
+        if df.empty:
+            return None, formatted_sid
 
-        if df.empty: return None, sid
-
+        # 處理 MultiIndex 欄位名問題
         if isinstance(df.columns, pd.MultiIndex):
             df.columns = df.columns.get_level_values(0)
 
-        # 2. 即時報價注入邏輯
-        ticker_obj = yf.Ticker(formatted_sid)
-        info = ticker_obj.fast_info
-        live_price = info.get('last_price')
-        
-        tz_tw = pytz.timezone('Asia/Taipei')
-        now_tw = datetime.now(tz_tw)
-        last_date_in_df = df.index[-1].date()
+        # 數據清理：移除時區資訊以避免計算錯誤 (Already tz-aware 修正)
+        if df.index.tz is not None:
+            df.index = df.index.tz_localize(None)
 
-        # 如果最新的 K 線不是今天，則把即時價當作今天的收盤價注入
-        if live_price and last_date_in_df < now_tw.date():
-            new_timestamp = pd.Timestamp(now_tw.date())
-            new_row = pd.DataFrame({
-                'Open': [info.get('open', live_price)], 
-                'High': [info.get('day_high', live_price)], 
-                'Low': [info.get('day_low', live_price)], 
-                'Close': [live_price], 
-                'Volume': [info.get('last_volume', 0)]
-            }, index=[new_timestamp])
-            df = pd.concat([df, new_row])
-
-        # 3. 計算技術指標
-        close = df['Close']
-        df['MA5'] = close.rolling(5).mean()
-        df['MA10'] = close.rolling(10).mean()
-        df['RSI5'] = calculate_rsi(close, 5)
-        df['RSI10'] = calculate_rsi(close, 10)
-        df['BIAS10'] = ((close - df['MA10']) / df['MA10']) * 100
+        # 計算技術指標
+        df['MA5'] = df['Close'].rolling(5).mean()
+        df['MA10'] = df['Close'].rolling(10).mean()
+        df['RSI5'] = calculate_rsi(df['Close'], 5)
+        df['RSI10'] = calculate_rsi(df['Close'], 10)
         
-        # 訊號
+        # 買賣訊號
         df['Buy_Signal'] = (df['RSI5'] > df['RSI10']) & (df['RSI5'].shift(1) <= df['RSI10'].shift(1))
-        df['Sell_Signal'] = (df['MA5'] < df['MA10']) & (df['RSI5'] < 50)
+        df['Sell_Signal'] = (df['Close'] < df['MA10']) & (df['RSI5'] < 45)
         
         return df, formatted_sid
-    except Exception:
-        return None, ticker_input
+    except Exception as e:
+        st.error(f"分析出錯: {str(e)}")
+        return None, symbol
 
-# 初始化
-if 'view_days' not in st.session_state:
-    st.session_state.view_days = 60
+# --- 主介面 ---
+st.title("📈 台股即時監測")
 
-# --- UI 介面 ---
-st.markdown('<div class="stock-header"><h3 style="margin:0;">🚀 台股全時段監測系統</h3></div>', unsafe_allow_html=True)
-
-c1, c2 = st.columns([4, 1])
-with c1:
-    stock_code = st.text_input("代碼", value="2330", label_visibility="collapsed")
-with c2:
-    if st.button("🔄 刷新"):
+col_ctrl1, col_ctrl2 = st.columns([3, 1])
+with col_ctrl1:
+    target_stock = st.text_input("輸入股票代碼 (例如: 2330)", value="2330")
+with col_ctrl2:
+    if st.button("刷新數據"):
         st.cache_data.clear()
         st.rerun()
 
-# 時間區間選取
+# 天數切換按鈕
 d_cols = st.columns(5)
-for i, d in enumerate([10, 20, 60, 120, 240]):
+day_options = [10, 20, 60, 120, 240]
+for i, d in enumerate(day_options):
     if d_cols[i].button(f"{d}天"):
         st.session_state.view_days = d
 
-data, real_sid = get_stock_data(stock_code)
+data, final_sid = fetch_data(target_stock)
 
 if data is not None:
+    # 根據選取的天數過濾數據
     display_df = data.tail(st.session_state.view_days)
     latest = display_df.iloc[-1]
     
-    # 動態計算 Y 軸範圍：取顯示區間的最低與最高價，並給予 2% 的上下緩衝
-    y_min = display_df['Close'].min() * 0.98
-    y_max = display_df['Close'].max() * 1.02
+    # 【關鍵修正】動態 Y 軸範圍計算
+    # 取得當前顯示區間的最高與最低價，並給予 3% 的視覺緩衝
+    current_min = display_df['Close'].min()
+    current_max = display_df['Close'].max()
+    y_range_min = current_min * 0.97
+    y_range_max = current_max * 1.03
 
-    # --- Plotly 圖表 ---
+    # 繪製圖表
     fig = go.Figure()
 
-    # 1. 價格曲線
+    # 股價線
     fig.add_trace(go.Scatter(
         x=display_df.index, y=display_df['Close'],
-        name="收盤價", line=dict(color='#38bdf8', width=3),
-        hovertemplate="價格: %{y:.2f}<br>MA5: %{customdata[0]:.2f}<br>MA10: %{customdata[1]:.2f}",
-        customdata=display_df[['MA5', 'MA10']]
+        name="收盤價", line=dict(color='#38bdf8', width=2),
+        fill='tozeroy', fillcolor='rgba(56, 189, 248, 0.05)'
     ))
 
-    # 2. RSI 隱藏追蹤 (為了在 Tooltip 顯示)
-    fig.add_trace(go.Scatter(
-        x=display_df.index, y=display_df['RSI5'],
-        name="RSI(5)", line=dict(color='rgba(0,0,0,0)'),
-        hovertemplate="RSI(5): %{y:.1f}"
-    ))
-
-    # 3. 買賣訊號點
+    # 買入訊號標記
     buys = display_df[display_df['Buy_Signal']]
-    sells = display_df[display_df['Sell_Signal']]
-    fig.add_trace(go.Scatter(x=buys.index, y=buys['Close'], mode='markers', marker=dict(symbol='triangle-up', size=15, color='#ef4444'), name='買入'))
-    fig.add_trace(go.Scatter(x=sells.index, y=sells['Close'], mode='markers', marker=dict(symbol='triangle-down', size=15, color='#22c55e'), name='賣出'))
+    fig.add_trace(go.Scatter(
+        x=buys.index, y=buys['Close'],
+        mode='markers', name='買入訊號',
+        marker=dict(symbol='triangle-up', size=12, color='#ef4444')
+    ))
 
-    # 佈局設定
     fig.update_layout(
-        height=480, template="plotly_dark",
-        hovermode="x unified", 
-        showlegend=False,
-        margin=dict(l=10, r=10, t=10, b=10),
-        paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)',
-        xaxis=dict(showgrid=False, type='date'),
+        template="plotly_dark",
+        height=500,
+        margin=dict(l=10, r=10, t=30, b=10),
+        xaxis=dict(showgrid=False, rangeslider=dict(visible=False)),
         yaxis=dict(
-            side='right', 
-            gridcolor='#1e293b', 
-            fixedrange=False,
-            range=[y_min, y_max],  # 強制 Y 軸根據當前數據區間調整
-            tickformat='.1f'
+            side='right',
+            gridcolor='#334155',
+            range=[y_range_min, y_range_max], # 強制鎖定當前數據範圍
+            fixedrange=False
         ),
-        hoverlabel=dict(bgcolor="#1e293b", font_size=13)
+        hovermode="x unified"
     )
 
-    # 顯示圖表
-    st.plotly_chart(fig, use_container_width=True, config={'displayModeBar': False})
+    st.plotly_chart(fig, use_container_width=True)
 
-    # 數據卡片
-    m1, m2, m3, m4 = st.columns(4)
-    m1.metric("即時成交價", f"{latest['Close']:.2f}")
-    m2.metric("RSI(5)", f"{latest['RSI5']:.1f}")
-    m3.metric("10日乖離", f"{latest['BIAS10']:.1f}%")
-    m4.metric("今日成交量", f"{int(latest['Volume']):,}")
+    # 狀態資訊卡
+    c1, c2, c3 = st.columns(3)
+    c1.metric("當前價格", f"{latest['Close']:.2f}")
+    c2.metric("RSI(5)", f"{latest['RSI5']:.1f}")
+    c3.metric("5日均線", f"{latest['MA5']:.2f}")
 
-    # 警報面板
+    # 訊號提示
     if latest['Buy_Signal']:
-        st.markdown('<div class="status-box" style="background:#450a0a; color:#f87171; border:1px solid #ef4444;">🚨 買入訊號：RSI 黃金交叉</div>', unsafe_allow_html=True)
+        st.markdown('<div class="status-box" style="background:#450a0a; color:#f87171; border:1px solid #ef4444;">🔥 偵測到買入訊號：RSI 黃金交叉</div>', unsafe_allow_html=True)
     elif latest['Sell_Signal']:
-        st.markdown('<div class="status-box" style="background:#064e3b; color:#4ade80; border:1px solid #22c55e;">✅ 賣出訊號：趨勢轉弱</div>', unsafe_allow_html=True)
+        st.markdown('<div class="status-box" style="background:#064e3b; color:#4ade80; border:1px solid #22c55e;">⚠️ 注意：價格跌破均線且 RSI 偏弱</div>', unsafe_allow_html=True)
     else:
-        st.markdown('<div class="status-box" style="background:#1e293b; color:#94a3b8; border:1px solid #334155;">📊 市場掃描中：無特別訊號</div>', unsafe_allow_html=True)
+        st.markdown('<div class="status-box" style="background:#1e293b; color:#94a3b8; border:1px solid #334155;">🔎 目前趨勢穩定，無明顯交易訊號</div>', unsafe_allow_html=True)
 
-    st.caption(f"數據最後更新: {latest.name.strftime('%Y-%m-%d')} | 標的: {real_sid}")
-    
-    # 自動刷新
-    time.sleep(30)
-    st.rerun()
+    st.caption(f"最後更新時間: {latest.name.strftime('%Y-%m-%d')} | 標的代號: {final_sid}")
 else:
-    st.error("無法取得該股票數據。")
+    st.warning(f"找不到 '{target_stock}' 的數據，請檢查代碼是否正確。")
