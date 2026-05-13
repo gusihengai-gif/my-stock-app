@@ -62,16 +62,17 @@ def fetch_data(ticker_input):
         df['RSI5'] = calculate_rsi(close, 5)
         df['RSI10'] = calculate_rsi(close, 10)
         
-        # --- 買入策略修正 ---
-        # 1. MA5 > MA10 (黃金交叉)
-        # 2. RSI5 > RSI10 且 RSI5 > 50
-        # 3. BIAS10 < 5%
-        df['Buy_Signal'] = (df['MA5'] > df['MA10']) & \
-                          (df['RSI5'] > df['RSI10']) & \
+        # --- 買入策略修正：RSI 黃金交叉 ---
+        # 1. RSI(5) 向上穿透 RSI(10) (黃金交叉)
+        # 2. RSI(5) > 50
+        # 3. BIAS(10) < 5%
+        rsi_cross = (df['RSI5'] > df['RSI10']) & (df['RSI5'].shift(1) <= df['RSI10'].shift(1))
+        
+        df['Buy_Signal'] = rsi_cross & \
                           (df['RSI5'] > 50) & \
                           (df['BIAS10'] < 5)
         
-        # 賣出訊號 (維持原樣或根據需要調整)
+        # 賣出訊號
         df['Sell_Signal'] = (close < df['MA10']) & (df['RSI5'] < 45)
         
         return df, symbol
@@ -151,11 +152,11 @@ if data is not None:
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("價格", f"{latest['Close']:.2f}")
     c2.metric("RSI(5)", f"{latest['RSI5']:.1f}")
-    c3.metric("10日乖離", f"{latest['BIAS10']:.2f}%")
-    c4.metric("MA5", f"{latest['MA5']:.1f}")
+    c3.metric("RSI(10)", f"{latest['RSI10']:.1f}")
+    c4.metric("10日乖離", f"{latest['BIAS10']:.2f}%")
     
     if latest['Buy_Signal']:
-        status, sc = "🔴 買入訊號觸發", "#ff4b4b"
+        status, sc = "🔴 RSI 黃金交叉觸發", "#ff4b4b"
     elif latest['Sell_Signal']:
         status, sc = "🟢 賣出訊號觸發", "#00f900"
     else:
