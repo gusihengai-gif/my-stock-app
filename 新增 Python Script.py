@@ -93,8 +93,7 @@ if data is not None:
     display_df = data.tail(st.session_state.view_days)
     latest = display_df.iloc[-1]
     
-    # 【關鍵修正】動態 Y 軸範圍計算
-    # 取得當前顯示區間的最高與最低價，並給予 3% 的視覺緩衝
+    # 動態 Y 軸範圍計算
     current_min = display_df['Close'].min()
     current_max = display_df['Close'].max()
     y_range_min = current_min * 0.97
@@ -126,13 +125,14 @@ if data is not None:
         yaxis=dict(
             side='right',
             gridcolor='#334155',
-            range=[y_range_min, y_range_max], # 強制鎖定當前數據範圍
+            range=[y_range_min, y_range_max],
             fixedrange=False
         ),
         hovermode="x unified"
     )
 
-    st.plotly_chart(fig, use_container_width=True)
+    # 使用 config={'displayModeBar': False} 隱藏右上角工具列
+    st.plotly_chart(fig, use_container_width=True, config={'displayModeBar': False})
 
     # 狀態資訊卡
     c1, c2, c3 = st.columns(3)
