@@ -3,7 +3,7 @@ import yfinance as yf
 import pandas as pd
 import plotly.graph_objects as go
 import time
-from datetime import datetime, timedelta
+from datetime import datetime
 
 # 頁面設定
 st.set_page_config(page_title="台股終極策略監控", layout="wide", initial_sidebar_state="collapsed")
@@ -27,36 +27,35 @@ def calculate_rsi(series, period):
     rs = gain / loss.replace(0, 0.001)
     return 100 - (100 / (1 + rs))
 
-@st.cache_data(ttl=60)
+@st.cache_data(ttl=30)  # 縮短快取時間
 def get_analysis_data(ticker_input):
     try:
         symbol = ticker_input.strip()
         if symbol.isdigit(): symbol = f"{symbol}.TW"
         
-        # 1. 抓取歷史數據
         ticker_obj = yf.Ticker(symbol)
         df = ticker_obj.history(period="2y", interval="1d", auto_adjust=True)
         
-        if df.empty:
-            return None, symbol
+        if df.empty: return None, symbol
 
         if isinstance(df.columns, pd.MultiIndex):
             df.columns = df.columns.get_level_values(0)
 
-        # 2. 強制即時補點 (解決數據延遲問題)
+        # --- 強制即時補點邏輯 ---
         fast_info = ticker_obj.fast_info
         last_price = fast_info.get('last_price', None)
+        # 取得今天日期（考慮時區）
         today_ts = pd.Timestamp(datetime.now().date(), tz=df.index.tz)
         
+        # 如果最後一筆不是今天，且有即時報價，就強行塞入一列 5/13 或當日的價格
         if df.index[-1].date() < today_ts.date() and last_price:
             new_row = pd.DataFrame({
                 'Open': [last_price], 'High': [last_price], 
-                'Low': [last_price], 'Close': [last_price], 
-                'Volume': [0]
+                'Low': [last_price], 'Close': [last_price], 'Volume': [0]
             }, index=[today_ts])
             df = pd.concat([df, new_row])
-        
-        # 指標計算
+        # ----------------------
+
         close = df['Close']
         df['MA5'] = close.rolling(5).mean()
         df['MA10'] = close.rolling(10).mean()
@@ -69,10 +68,9 @@ def get_analysis_data(ticker_input):
         
         return df, symbol
     except Exception as e:
-        st.error(f"數據抓取失敗: {e}")
         return None, ticker_input
 
-# --- 主介面 ---
+# --- 介面 ---
 st.markdown(f"""<div class="stock-header"><h1 style='margin:0; color:white; font-size:2.2rem;'>🚀 台股終極策略監控</h1></div>""", unsafe_allow_html=True)
 
 if 'view_days' not in st.session_state:
@@ -86,7 +84,6 @@ with c_refresh:
         st.cache_data.clear()
         st.rerun()
 
-# 天數切換
 cols = st.columns(5)
 for i, d in enumerate([10, 20, 60, 120, 240]):
     if cols[i].button(f"{d}天"):
@@ -107,27 +104,23 @@ if data is not None:
         hovertemplate="日期: %{x|%Y-%m-%d}<br>價格: %{y:.2f}<extra></extra>"
     ))
     
-    # 買賣標記
+    # 標記買賣點
     buys = display_df[display_df['Buy_Trigger']]
     sells = display_df[display_df['Sell_Trigger']]
-    fig.add_trace(go.Scatter(x=buys.index, y=buys['Close'], mode='markers', name='買', marker=dict(symbol='triangle-up', size=12, color='#ff4b4b')))
-    fig.add_trace(go.Scatter(x=sells.index, y=sells['Close'], mode='markers', name='賣', marker=dict(symbol='triangle-down', size=12, color='#00f900')))
+    fig.add_trace(go.Scatter(x=buys.index, y=buys['Close'], mode='markers', marker=dict(symbol='triangle-up', size=12, color='#ff4b4b')))
+    fig.add_trace(go.Scatter(x=sells.index, y=sells['Close'], mode='markers', marker=dict(symbol='triangle-down', size=12, color='#00f900')))
 
-    # y 軸價格範圍自動優化
     y_min, y_max = display_df['Close'].min() * 0.98, display_df['Close'].max() * 1.02
-
     fig.update_layout(
         height=450, template="plotly_dark", paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)',
         margin=dict(l=0, r=0, t=10, b=0),
-        xaxis=dict(showgrid=False), 
-        yaxis=dict(side='right', gridcolor='#1e293b', range=[y_min, y_max], autorange=False),
+        xaxis=dict(showgrid=False), yaxis=dict(side='right', gridcolor='#1e293b', range=[y_min, y_max], autorange=False),
         showlegend=False, hovermode="x unified"
     )
     
-    # 關鍵修改：加入 config={'displayModeBar': False} 隱藏右上角工具列
+    # 隱藏右上角工具列
     st.plotly_chart(fig, use_container_width=True, config={'displayModeBar': False})
 
-    # 數據指標卡
     c1, c2, c3 = st.columns(3)
     c1.metric("當前價格", f"{latest['Close']:.2f}")
     c2.metric("RSI (5D)", f"{latest['RSI5']:.1f}")
@@ -138,11 +131,12 @@ if data is not None:
     else: status, sc = "趨勢觀察中", "#94a3b8"
     
     st.markdown(f"""<div class="status-box" style="border: 2px solid {sc}; color: {sc}; background: {sc}15;">{status}</div>""", unsafe_allow_html=True)
-    st.caption(f"數據最後更新日期: {latest.name.strftime('%Y-%m-%d')}")
+    st.caption(f"數據最後更新: {latest.name.strftime('%Y-%m-%d %H:%M:%S')}")
 
-    # 盤中刷新
+    # --- 30 秒自動刷新邏輯 ---
     now = datetime.now()
-    if now.weekday() < 5 and (9 <= now.hour < 14):
+    # 僅在台股交易時段自動刷新，節省資源
+    if now.weekday() < 5 and (8 < now.hour < 15):
         time.sleep(30)
         st.rerun()
 else:
