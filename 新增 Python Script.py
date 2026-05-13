@@ -3,7 +3,7 @@ import yfinance as yf
 import pandas as pd
 import plotly.graph_objects as go
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 
 # 頁面設定
 st.set_page_config(page_title="台股終極策略監控", layout="wide", initial_sidebar_state="collapsed")
@@ -27,12 +27,14 @@ def calculate_rsi(series, period):
     rs = gain / loss.replace(0, 0.001)
     return 100 - (100 / (1 + rs))
 
-@st.cache_data(ttl=300)
+# 縮短快取時間以獲取較新數據
+@st.cache_data(ttl=60)
 def get_analysis_data(ticker_input):
     try:
         symbol = ticker_input.strip()
         if symbol.isdigit(): symbol = f"{symbol}.TW"
         
+        # 使用 1d interval 獲取最新資料
         df = yf.download(symbol, period="2y", auto_adjust=True, progress=False)
         if df.empty and ".TW" in symbol:
             symbol = symbol.replace(".TW", ".TWO")
@@ -60,7 +62,14 @@ def get_analysis_data(ticker_input):
 # --- 介面 ---
 st.markdown(f"""<div class="stock-header"><h1 style='margin:0; color:white; font-size:2.2rem;'>🚀 台股終極策略監控</h1></div>""", unsafe_allow_html=True)
 
-user_input = st.text_input("🔍 代號", value="2330")
+# 搜尋與手動刷新
+c_search, c_refresh = st.columns([4, 1])
+with c_search:
+    user_input = st.text_input("🔍 代號", value="2330", label_visibility="collapsed")
+with c_refresh:
+    if st.button("🔄 刷新"):
+        st.cache_data.clear()
+        st.rerun()
 
 # 修正：初始化 session_state
 if 'view_days' not in st.session_state:
@@ -76,7 +85,6 @@ for i, d in enumerate(days_list):
 data, final_ticker = get_analysis_data(user_input)
 
 if data is not None:
-    # 修正之前的變數名稱錯誤
     current_days = st.session_state.view_days
     display_df = data.tail(current_days)
     latest = display_df.iloc[-1]
@@ -121,5 +129,13 @@ if data is not None:
     else: status, sc = "趨勢觀察中", "#94a3b8"
     
     st.markdown(f"""<div class="status-box" style="border: 2px solid {sc}; color: {sc}; background: {sc}15;">{status}</div>""", unsafe_allow_html=True)
+
+    # 盤中自動刷新邏輯 (台股交易時間 09:00 - 13:30)
+    now = datetime.now()
+    if now.weekday() < 5 and (9 <= now.hour < 14):
+        # 顯示最後更新時間
+        st.caption(f"盤中自動監控中... 最後更新: {now.strftime('%H:%M:%S')}")
+        time.sleep(30) # 每 30 秒刷一次
+        st.rerun()
 else:
     st.warning("請輸入正確代號。")
