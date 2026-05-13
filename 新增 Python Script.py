@@ -27,46 +27,56 @@ def calculate_rsi(series, period):
     rs = gain / loss.replace(0, 0.001)
     return 100 - (100 / (1 + rs))
 
-@st.cache_data(ttl=30)
+@st.cache_data(ttl=60)
 def get_analysis_data(ticker_input):
     try:
         symbol = ticker_input.strip()
-        if symbol.isdigit(): symbol = f"{symbol}.TW"
-        
-        ticker_obj = yf.Ticker(symbol)
-        # 抓取較長一點的數據以確保指標計算準確
+        if symbol.isdigit(): 
+            symbol_tw = f"{symbol}.TW"
+            symbol_two = f"{symbol}.TWO"
+        else:
+            symbol_tw = symbol
+            symbol_two = symbol
+
+        # 優先嘗試上市 (.TW)
+        ticker_obj = yf.Ticker(symbol_tw)
         df = ticker_obj.history(period="2y", interval="1d", auto_adjust=True)
         
+        # 若沒數據，嘗試上櫃 (.TWO)
         if df.empty:
-            # 嘗試上櫃市場代碼
-            if ".TW" in symbol:
-                symbol = symbol.replace(".TW", ".TWO")
-                df = ticker_obj.history(period="2y", interval="1d", auto_adjust=True)
-            if df.empty: return None, symbol
-
+            ticker_obj = yf.Ticker(symbol_two)
+            df = ticker_obj.history(period="2y", interval="1d", auto_adjust=True)
+            if df.empty: return None, ticker_input
+        
+        # 修正 MultiIndex 問題
         if isinstance(df.columns, pd.MultiIndex):
             df.columns = df.columns.get_level_values(0)
 
-        # --- 進階補點邏輯：解決部分股票不更新的問題 ---
-        # 1. 獲取即時報價 (fast_info 較快，但有時會失效，改用多重備份)
-        fast_info = ticker_obj.fast_info
-        current_price = fast_info.get('last_price') or ticker_obj.info.get('regularMarketPrice')
-        
-        # 2. 獲取今天日期
+        # --- 增強版即時報價補點 ---
+        current_price = None
+        try:
+            # 優先級 1: fast_info (最快)
+            current_price = ticker_obj.fast_info.get('last_price')
+            # 優先級 2: info 中的價格 (備援)
+            if not current_price:
+                current_price = ticker_obj.info.get('regularMarketPrice')
+            # 優先級 3: 歷史數據最後一筆 (最終保底)
+            if not current_price:
+                current_price = df['Close'].iloc[-1]
+        except:
+            current_price = df['Close'].iloc[-1]
+
         now = datetime.now()
-        today_ts = pd.Timestamp(now.date(), tz=df.index.tz)
-        
-        # 3. 判斷是否需要補點
-        # 如果最後一筆數據日期早於今天，且現在是交易時間或已有最新報價
-        if df.index[-1].date() < now.date() and current_price:
-            # 只有在開盤後(9:00)才補今天的點
-            if now.hour >= 9:
-                new_row = pd.DataFrame({
-                    'Open': [current_price], 'High': [current_price], 
-                    'Low': [current_price], 'Close': [current_price], 'Volume': [0]
-                }, index=[today_ts])
-                df = pd.concat([df, new_row])
-        # -------------------------------------------
+        # 判斷最後一筆日期是否為今天 (考慮時區，簡單化處理)
+        last_date = df.index[-1].date()
+        if last_date < now.date() and now.hour >= 9:
+            # 補上一筆今天的數據
+            new_row = pd.DataFrame({
+                'Open': [current_price], 'High': [current_price], 
+                'Low': [current_price], 'Close': [current_price], 'Volume': [0]
+            }, index=[pd.Timestamp(now.date(), tz=df.index.tz)])
+            df = pd.concat([df, new_row])
+        # -----------------------
 
         close = df['Close']
         df['MA5'] = close.rolling(5).mean()
@@ -78,11 +88,12 @@ def get_analysis_data(ticker_input):
         df['Buy_Trigger'] = (df['RSI5'] > df['RSI10']) & (df['RSI5'].shift(1) <= df['RSI10'].shift(1)) & (df['RSI5'] > 50) & (df['BIAS10'] < 5)
         df['Sell_Trigger'] = (df['MA5'] < df['MA10']) & (df['RSI5'] < df['RSI10']) & (df['RSI5'] < 50) & (df['BIAS10'] > 10)
         
-        return df, symbol
+        return df, ticker_obj.ticker
     except Exception as e:
+        st.error(f"分析出錯: {e}")
         return None, ticker_input
 
-# --- 介面 ---
+# --- UI 介面 ---
 st.markdown(f"""<div class="stock-header"><h1 style='margin:0; color:white; font-size:2.2rem;'>🚀 台股終極策略監控</h1></div>""", unsafe_allow_html=True)
 
 if 'view_days' not in st.session_state:
@@ -90,21 +101,24 @@ if 'view_days' not in st.session_state:
 
 c_search, c_refresh = st.columns([4, 1])
 with c_search:
-    user_input = st.text_input("🔍 代號", value="2330", label_visibility="collapsed")
+    user_input = st.text_input("🔍 代號", value="2330", key="search_input", label_visibility="collapsed")
 with c_refresh:
     if st.button("🔄 刷新"):
         st.cache_data.clear()
         st.rerun()
 
 cols = st.columns(5)
-for i, d in enumerate([10, 20, 60, 120, 240]):
+day_options = [10, 20, 60, 120, 240]
+for i, d in enumerate(day_options):
     if cols[i].button(f"{d}天"):
         st.session_state.view_days = d
 
 data, final_ticker = get_analysis_data(user_input)
 
 if data is not None:
-    display_df = data.tail(st.session_state.view_days)
+    # 修正之前的 AttributeError 語法
+    num_days = st.session_state.view_days
+    display_df = data.tail(num_days)
     latest = display_df.iloc[-1]
     
     # 圖表
@@ -119,8 +133,8 @@ if data is not None:
     # 標記買賣點
     buys = display_df[display_df['Buy_Trigger']]
     sells = display_df[display_df['Sell_Trigger']]
-    fig.add_trace(go.Scatter(x=buys.index, y=buys['Close'], mode='markers', marker=dict(symbol='triangle-up', size=12, color='#ff4b4b')))
-    fig.add_trace(go.Scatter(x=sells.index, y=sells['Close'], mode='markers', marker=dict(symbol='triangle-down', size=12, color='#00f900')))
+    fig.add_trace(go.Scatter(x=buys.index, y=buys['Close'], mode='markers', marker=dict(symbol='triangle-up', size=12, color='#ff4b4b'), name='買入'))
+    fig.add_trace(go.Scatter(x=sells.index, y=sells['Close'], mode='markers', marker=dict(symbol='triangle-down', size=12, color='#00f900'), name='賣出'))
 
     y_min, y_max = display_df['Close'].min() * 0.98, display_df['Close'].max() * 1.02
     fig.update_layout(
@@ -130,7 +144,6 @@ if data is not None:
         showlegend=False, hovermode="x unified"
     )
     
-    # 隱藏右上角工具列
     st.plotly_chart(fig, use_container_width=True, config={'displayModeBar': False})
 
     c1, c2, c3 = st.columns(3)
@@ -143,13 +156,12 @@ if data is not None:
     else: status, sc = "趨勢觀察中", "#94a3b8"
     
     st.markdown(f"""<div class="status-box" style="border: 2px solid {sc}; color: {sc}; background: {sc}15;">{status}</div>""", unsafe_allow_html=True)
-    st.caption(f"數據最後更新: {latest.name.strftime('%Y-%m-%d %H:%M:%S')}")
+    st.caption(f"標的: {final_ticker} | 最後數據時間: {latest.name.strftime('%Y-%m-%d')}")
 
-    # --- 30 秒自動刷新邏輯 ---
+    # --- 盤中自動刷新邏輯 (每 30 秒) ---
     now = datetime.now()
-    # 僅在台股交易時段及收盤後一小時內自動刷新
-    if now.weekday() < 5 and (8 < now.hour < 15):
+    if now.weekday() < 5 and (9 <= now.hour < 14):
         time.sleep(30)
         st.rerun()
 else:
-    st.warning("找不到數據。")
+    st.warning(f"目前無法獲取 '{user_input}' 的數據，請檢查代號是否正確。")
