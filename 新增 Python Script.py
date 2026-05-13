@@ -40,18 +40,14 @@ def get_analysis_data(ticker_input):
         if df.empty:
             return None, symbol
 
-        # 處理 MultiIndex 欄位問題
         if isinstance(df.columns, pd.MultiIndex):
             df.columns = df.columns.get_level_values(0)
 
-        # 2. 強制即時補點 (解決卡在 5/12 的問題)
-        # 獲取今日最新價格與日期
+        # 2. 強制即時補點 (解決數據延遲問題)
         fast_info = ticker_obj.fast_info
         last_price = fast_info.get('last_price', None)
-        # 轉為台灣日期
         today_ts = pd.Timestamp(datetime.now().date(), tz=df.index.tz)
         
-        # 如果最後一筆數據不是今天，且目前有即時價格，則補上一行
         if df.index[-1].date() < today_ts.date() and last_price:
             new_row = pd.DataFrame({
                 'Open': [last_price], 'High': [last_price], 
@@ -60,7 +56,7 @@ def get_analysis_data(ticker_input):
             }, index=[today_ts])
             df = pd.concat([df, new_row])
         
-        # 計算指標
+        # 指標計算
         close = df['Close']
         df['MA5'] = close.rolling(5).mean()
         df['MA10'] = close.rolling(10).mean()
@@ -79,13 +75,12 @@ def get_analysis_data(ticker_input):
 # --- 主介面 ---
 st.markdown(f"""<div class="stock-header"><h1 style='margin:0; color:white; font-size:2.2rem;'>🚀 台股終極策略監控</h1></div>""", unsafe_allow_html=True)
 
-# 初始化 Session State 防止報錯
 if 'view_days' not in st.session_state:
     st.session_state.view_days = 60
 
 c_search, c_refresh = st.columns([4, 1])
 with c_search:
-    user_input = st.text_input("🔍 請輸入台股代號 (如: 2330)", value="2330", label_visibility="collapsed")
+    user_input = st.text_input("🔍 代號", value="2330", label_visibility="collapsed")
 with c_refresh:
     if st.button("🔄 刷新"):
         st.cache_data.clear()
@@ -100,11 +95,10 @@ for i, d in enumerate([10, 20, 60, 120, 240]):
 data, final_ticker = get_analysis_data(user_input)
 
 if data is not None:
-    # 修正：直接使用 session_state 的值
     display_df = data.tail(st.session_state.view_days)
     latest = display_df.iloc[-1]
     
-    # Plotly 圖表
+    # 圖表
     fig = go.Figure()
     fig.add_trace(go.Scatter(
         x=display_df.index, y=display_df['Close'],
@@ -119,14 +113,19 @@ if data is not None:
     fig.add_trace(go.Scatter(x=buys.index, y=buys['Close'], mode='markers', name='買', marker=dict(symbol='triangle-up', size=12, color='#ff4b4b')))
     fig.add_trace(go.Scatter(x=sells.index, y=sells['Close'], mode='markers', name='賣', marker=dict(symbol='triangle-down', size=12, color='#00f900')))
 
+    # y 軸價格範圍自動優化
+    y_min, y_max = display_df['Close'].min() * 0.98, display_df['Close'].max() * 1.02
+
     fig.update_layout(
         height=450, template="plotly_dark", paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)',
         margin=dict(l=0, r=0, t=10, b=0),
-        xaxis=dict(showgrid=False), yaxis=dict(side='right', gridcolor='#1e293b'),
+        xaxis=dict(showgrid=False), 
+        yaxis=dict(side='right', gridcolor='#1e293b', range=[y_min, y_max], autorange=False),
         showlegend=False, hovermode="x unified"
     )
     
-    st.plotly_chart(fig, use_container_width=True)
+    # 關鍵修改：加入 config={'displayModeBar': False} 隱藏右上角工具列
+    st.plotly_chart(fig, use_container_width=True, config={'displayModeBar': False})
 
     # 數據指標卡
     c1, c2, c3 = st.columns(3)
@@ -134,7 +133,6 @@ if data is not None:
     c2.metric("RSI (5D)", f"{latest['RSI5']:.1f}")
     c3.metric("10日乖離", f"{latest['BIAS10']:.2f}%")
     
-    # 訊號狀態
     if latest['Buy_Trigger']: status, sc = "🔴 買入訊號觸發", "#ff4b4b"
     elif latest['Sell_Trigger']: status, sc = "🟢 賣出訊號觸發", "#00f900"
     else: status, sc = "趨勢觀察中", "#94a3b8"
@@ -142,5 +140,10 @@ if data is not None:
     st.markdown(f"""<div class="status-box" style="border: 2px solid {sc}; color: {sc}; background: {sc}15;">{status}</div>""", unsafe_allow_html=True)
     st.caption(f"數據最後更新日期: {latest.name.strftime('%Y-%m-%d')}")
 
+    # 盤中刷新
+    now = datetime.now()
+    if now.weekday() < 5 and (9 <= now.hour < 14):
+        time.sleep(30)
+        st.rerun()
 else:
-    st.warning("找不到數據，請確認代號是否正確。")
+    st.warning("找不到數據。")
