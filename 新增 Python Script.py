@@ -108,6 +108,10 @@ data, real_sid = get_stock_data(stock_code)
 if data is not None:
     display_df = data.tail(st.session_state.view_days)
     latest = display_df.iloc[-1]
+    
+    # 動態計算 Y 軸範圍：取顯示區間的最低與最高價，並給予 2% 的上下緩衝
+    y_min = display_df['Close'].min() * 0.98
+    y_max = display_df['Close'].max() * 1.02
 
     # --- Plotly 圖表 ---
     fig = go.Figure()
@@ -136,16 +140,22 @@ if data is not None:
     # 佈局設定
     fig.update_layout(
         height=480, template="plotly_dark",
-        hovermode="x unified", # 關鍵：指到哪看到哪
+        hovermode="x unified", 
         showlegend=False,
         margin=dict(l=10, r=10, t=10, b=10),
         paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)',
         xaxis=dict(showgrid=False, type='date'),
-        yaxis=dict(side='right', gridcolor='#1e293b', fixedrange=False),
+        yaxis=dict(
+            side='right', 
+            gridcolor='#1e293b', 
+            fixedrange=False,
+            range=[y_min, y_max],  # 強制 Y 軸根據當前數據區間調整
+            tickformat='.1f'
+        ),
         hoverlabel=dict(bgcolor="#1e293b", font_size=13)
     )
 
-    # 隱藏工具列並顯示圖表
+    # 顯示圖表
     st.plotly_chart(fig, use_container_width=True, config={'displayModeBar': False})
 
     # 數據卡片
