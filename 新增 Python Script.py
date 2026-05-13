@@ -3,7 +3,7 @@ import yfinance as yf
 import pandas as pd
 import plotly.graph_objects as go
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 
 # 頁面設定
 st.set_page_config(page_title="台股終極策略監控", layout="wide", initial_sidebar_state="collapsed")
@@ -27,34 +27,46 @@ def calculate_rsi(series, period):
     rs = gain / loss.replace(0, 0.001)
     return 100 - (100 / (1 + rs))
 
-@st.cache_data(ttl=30)  # 縮短快取時間
+@st.cache_data(ttl=30)
 def get_analysis_data(ticker_input):
     try:
         symbol = ticker_input.strip()
         if symbol.isdigit(): symbol = f"{symbol}.TW"
         
         ticker_obj = yf.Ticker(symbol)
+        # 抓取較長一點的數據以確保指標計算準確
         df = ticker_obj.history(period="2y", interval="1d", auto_adjust=True)
         
-        if df.empty: return None, symbol
+        if df.empty:
+            # 嘗試上櫃市場代碼
+            if ".TW" in symbol:
+                symbol = symbol.replace(".TW", ".TWO")
+                df = ticker_obj.history(period="2y", interval="1d", auto_adjust=True)
+            if df.empty: return None, symbol
 
         if isinstance(df.columns, pd.MultiIndex):
             df.columns = df.columns.get_level_values(0)
 
-        # --- 強制即時補點邏輯 ---
+        # --- 進階補點邏輯：解決部分股票不更新的問題 ---
+        # 1. 獲取即時報價 (fast_info 較快，但有時會失效，改用多重備份)
         fast_info = ticker_obj.fast_info
-        last_price = fast_info.get('last_price', None)
-        # 取得今天日期（考慮時區）
-        today_ts = pd.Timestamp(datetime.now().date(), tz=df.index.tz)
+        current_price = fast_info.get('last_price') or ticker_obj.info.get('regularMarketPrice')
         
-        # 如果最後一筆不是今天，且有即時報價，就強行塞入一列 5/13 或當日的價格
-        if df.index[-1].date() < today_ts.date() and last_price:
-            new_row = pd.DataFrame({
-                'Open': [last_price], 'High': [last_price], 
-                'Low': [last_price], 'Close': [last_price], 'Volume': [0]
-            }, index=[today_ts])
-            df = pd.concat([df, new_row])
-        # ----------------------
+        # 2. 獲取今天日期
+        now = datetime.now()
+        today_ts = pd.Timestamp(now.date(), tz=df.index.tz)
+        
+        # 3. 判斷是否需要補點
+        # 如果最後一筆數據日期早於今天，且現在是交易時間或已有最新報價
+        if df.index[-1].date() < now.date() and current_price:
+            # 只有在開盤後(9:00)才補今天的點
+            if now.hour >= 9:
+                new_row = pd.DataFrame({
+                    'Open': [current_price], 'High': [current_price], 
+                    'Low': [current_price], 'Close': [current_price], 'Volume': [0]
+                }, index=[today_ts])
+                df = pd.concat([df, new_row])
+        # -------------------------------------------
 
         close = df['Close']
         df['MA5'] = close.rolling(5).mean()
@@ -135,7 +147,7 @@ if data is not None:
 
     # --- 30 秒自動刷新邏輯 ---
     now = datetime.now()
-    # 僅在台股交易時段自動刷新，節省資源
+    # 僅在台股交易時段及收盤後一小時內自動刷新
     if now.weekday() < 5 and (8 < now.hour < 15):
         time.sleep(30)
         st.rerun()
