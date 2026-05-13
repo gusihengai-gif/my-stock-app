@@ -54,20 +54,24 @@ def fetch_data(ticker_input):
         close = df['Close'].squeeze()
         
         # 技術指標計算
+        df['MA5'] = close.rolling(5).mean()
+        df['MA10'] = close.rolling(10).mean()
         df['MA20'] = close.rolling(20).mean()
         df['MA60'] = close.rolling(60).mean()
-        df['MA10'] = close.rolling(10).mean()
         df['BIAS10'] = ((close - df['MA10']) / df['MA10']) * 100
         df['RSI5'] = calculate_rsi(close, 5)
         df['RSI10'] = calculate_rsi(close, 10)
         
-        # 買入訊號
-        df['Buy_Signal'] = (df['MA20'] > df['MA60']) & \
+        # --- 買入策略修正 ---
+        # 1. MA5 > MA10 (黃金交叉)
+        # 2. RSI5 > RSI10 且 RSI5 > 50
+        # 3. BIAS10 < 5%
+        df['Buy_Signal'] = (df['MA5'] > df['MA10']) & \
                           (df['RSI5'] > df['RSI10']) & \
                           (df['RSI5'] > 50) & \
-                          (df['BIAS10'] <= 5)
+                          (df['BIAS10'] < 5)
         
-        # 賣出訊號
+        # 賣出訊號 (維持原樣或根據需要調整)
         df['Sell_Signal'] = (close < df['MA10']) & (df['RSI5'] < 45)
         
         return df, symbol
@@ -132,9 +136,9 @@ if data is not None:
             side='right', 
             gridcolor='#1e293b', 
             fixedrange=True,
-            range=[y_min, y_max], # 設定優化的 Y 軸顯示範圍
-            tickformat='.2f',    # 顯示至小數點後兩位
-            showgrid=True        # 顯示水平格線
+            range=[y_min, y_max], 
+            tickformat='.2f',    
+            showgrid=True        
         ),
         hovermode="x unified", showlegend=False,
         dragmode=False 
@@ -148,7 +152,7 @@ if data is not None:
     c1.metric("價格", f"{latest['Close']:.2f}")
     c2.metric("RSI(5)", f"{latest['RSI5']:.1f}")
     c3.metric("10日乖離", f"{latest['BIAS10']:.2f}%")
-    c4.metric("MA20", f"{latest['MA20']:.1f}")
+    c4.metric("MA5", f"{latest['MA5']:.1f}")
     
     if latest['Buy_Signal']:
         status, sc = "🔴 買入訊號觸發", "#ff4b4b"
